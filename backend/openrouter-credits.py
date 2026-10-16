@@ -36,12 +36,19 @@ def env_value(name: str, path: str) -> str:
     return ""
 
 
+# Two sequential calls run inside the gateway's 30s `shell.exec` window: two
+# stalls at 15s each would sit exactly on that edge and time the read out.
+# 8s per call keeps the worst case at 16s, so a slow OpenRouter degrades into
+# a slow reading instead of a failed one.
+TIMEOUT = 8
+
+
 def get_json(url: str, api_key: str) -> dict:
     request = urllib.request.Request(
         url,
         headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
         return (json.loads(response.read() or b"{}") or {}).get("data") or {}
 
 

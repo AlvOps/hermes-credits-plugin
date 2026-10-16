@@ -42,7 +42,11 @@ const READER_CMD = 'python3 "${HOME:-/home/talos}/.hermes/bin/openrouter-credits
 // One row per API call: model, tokens, latency, cache and the billed price.
 // Rows come from the backend reader, which prices each generation from
 // OpenRouter's /generation endpoint — the same total_cost the workspace logs
-// page shows. Newest first; the newest call or two may still be unpriced.
+// page shows. That endpoint started answering 404 for every id (a call made
+// seconds earlier included), so the reader now falls back to tokens x the
+// provider's own rate: those rows arrive with `est` and render as `~$0.0017`
+// instead of `$0.001741`, because an estimate must not look like an invoice.
+// Newest first; the newest call or two may still be unpriced.
 
 const FEED_LIMIT = 24
 /** `shell.exec` hands back only `stdout[-4000:]`, so the reader caps its own
@@ -178,7 +182,11 @@ function useCalls(sessionId, wide) {
     },
     staleTime: 2_000,
     refetchInterval: () => refetchDelay(),
-    retry: 0
+    // One retry: the failure this reader actually hits is a transient gateway
+    // door (a restart, or a turn holding the shell open), and the next poll is
+    // a full poll interval away — a lone retry beats two minutes of blank rows.
+    retry: 1,
+    retryDelay: 2_000
   })
 }
 
@@ -204,6 +212,9 @@ const EN = {
   live: 'live',
   clear: 'clear',
   pending: 'pricing…',
+  // Shown on hover over a `~$0.0017` row: OpenRouter's /generation lookup has
+  // no record of this call, so the price is tokens x the provider's own rate.
+  estTip: 'estimated from tokens × the provider rate',
   feedEmpty: 'No API calls for this session in the log.',
   otherSessions: 'all chats',
   thisChat: 'this chat',
@@ -250,11 +261,13 @@ const CSS = `
 .hc-call{display:flex;flex-direction:column;gap:1px;padding:4px;border-left:2px solid transparent;border-radius:3px}
 .hc-call:hover{background:var(--ui-row-hover-background)}
 .hc-call[data-priced=yes]{border-left-color:var(--ui-accent,var(--accent,#6ea8fe))}
+.hc-call[data-priced=est]{border-left-color:var(--ui-text-quaternary)}
 .hc-call-top{display:flex;align-items:baseline;gap:6px}
 .hc-call-time{flex:none;font-family:var(--font-mono,monospace);font-size:10px;font-variant-numeric:tabular-nums;color:var(--ui-text-quaternary)}
 .hc-call-model{flex:1;min-width:0;overflow:hidden;font-size:11px;color:var(--ui-text-primary);text-overflow:ellipsis;white-space:nowrap}
 .hc-call-cost{flex:none;font-size:11px;font-variant-numeric:tabular-nums;color:var(--ui-accent,var(--accent,#6ea8fe));white-space:nowrap}
 .hc-call[data-priced=no] .hc-call-cost{color:var(--ui-text-quaternary)}
+.hc-call[data-priced=est] .hc-call-cost{color:var(--ui-text-tertiary,var(--ui-text-secondary))}
 .hc-call-stats{overflow:hidden;font-size:10px;color:var(--ui-text-quaternary);text-overflow:ellipsis;white-space:nowrap}
 .hc-chip:hover{background:var(--chrome-action-hover);color:var(--ui-text-primary)}
 .hc-dot{width:6px;height:6px;border-radius:50%;background:var(--ui-accent,var(--accent,#6ea8fe));flex:none}
@@ -555,6 +568,9 @@ function CallsFeed({ sessionId, rawSessionId }) {
   const stale = !query.data && Boolean(cached)
   const priced = calls.filter(call => Number.isFinite(call.cost))
   const total = priced.reduce((sum, call) => sum + call.cost, 0)
+  // Any estimated row makes the sum an estimate too — say so on the total, not
+  // only on the individual rows.
+  const totalText = `${priced.some(call => call.est) ? '~' : ''}${price(total)}`
   const allScope = payload.scope === 'all'
 
   // One breadcrumb per app run: which accent token this build actually exposes,
@@ -569,7 +585,7 @@ function CallsFeed({ sessionId, rawSessionId }) {
     busy ? jsx('span', { className: 'hc-feed-live', children: t('live') }) : null,
     stale ? jsx('span', { className: 'hc-note', children: t('notFresh', query.error ? oneLine(String(query.error.message || ''), 60) : '') }) : null,
     calls.length
-      ? jsx('span', { className: 'hc-note', children: t('callsSummary', calls.length, price(total)) })
+      ? jsx('span', { className: 'hc-note', children: t('callsSummary', calls.length, totalText) })
       : null,
     payload.dropped ? jsx('span', { className: 'hc-note', children: t('olderHidden', payload.dropped) }) : null,
     jsx('button', {
@@ -609,7 +625,7 @@ function CallsFeed({ sessionId, rawSessionId }) {
     ] })
   } else {
     list = jsx('div', { className: 'hc-feed', children: calls.map(call => jsxs('div', {
-      'data-priced': Number.isFinite(call.cost) ? 'yes' : 'no',
+      'data-priced': Number.isFinite(call.cost) ? (call.est ? 'est' : 'yes') : 'no',
       className: 'hc-call',
       children: [
         jsxs('div', { className: 'hc-call-top', children: [
@@ -617,7 +633,10 @@ function CallsFeed({ sessionId, rawSessionId }) {
           jsx('span', { className: 'hc-call-model', children: shortModel(call.model) }),
           jsx('span', {
             className: 'hc-call-cost',
-            children: Number.isFinite(call.cost) ? price(call.cost) : t('pending')
+            title: call.est ? t('estTip') : undefined,
+            children: Number.isFinite(call.cost)
+              ? `${call.est ? '~' : ''}${price(call.cost)}`
+              : t('pending')
           })
         ] }),
         jsx('span', { className: 'hc-call-stats', children: callStats(call) })
